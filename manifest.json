@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chat Logger",
-  "version": "6.4.0",
+  "version": "6.4.1",
   "description": "Сохраняет диалог с Claude в markdown-файл. Один клик — полный лог.",
   "icons": {
     "16": "icons/icon16.png",

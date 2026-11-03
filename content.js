@@ -184,6 +184,15 @@
   const fileContentsUrl = (org, fileUuid) =>
     `${location.origin}/api/organizations/${org}/files/${fileUuid}/contents`;
 
+  // Запасной адрес: рабочая папка чата, откуда файл скачивает сам сайт.
+  // Нужен, когда в хранилище файлов его нет (например, загрузки в чатах,
+  // где Claude работает в своей песочнице). Только для обычных чатов.
+  const sandboxUrl = (ctx, path) =>
+    ctx.chatId && /^\//.test(String(path || ''))
+      ? `${location.origin}/api/organizations/${ctx.org}/conversations/${ctx.chatId}` +
+        `/wiggle/download-file?path=${encodeURIComponent(path)}`
+      : null;
+
   // ---------- Сборка markdown ----------
 
   // Экранирует текст, чтобы теги вроде <div> внутри подписей не считались HTML
@@ -238,7 +247,8 @@
       seen.add(uuid);
       const label = f.file_name || (f.file_kind === 'image' ? 'image.png' : 'file');
       const name = ctx.alloc(label);
-      ctx.jobs.push({ name, url: fileContentsUrl(ctx.org, uuid) });
+      const path = /^\//.test(f.path || '') ? f.path : f.file_name ? `/mnt/user-data/uploads/${f.file_name}` : '';
+      ctx.jobs.push({ name, url: fileContentsUrl(ctx.org, uuid), fallback: sandboxUrl(ctx, path) });
       out += link(name, label);
     }
     return out;
@@ -374,7 +384,7 @@
     const n = (ctx.versions.get(key) || 0) + 1;
     ctx.versions.set(key, n);
     const saved = `versions/${base} v${n}${ext}`;
-    ctx.jobs.push({ name: saved, url: fileContentsUrl(ctx.org, f.file_uuid || f.uuid) });
+    ctx.jobs.push({ name: saved, url: fileContentsUrl(ctx.org, f.file_uuid || f.uuid), fallback: sandboxUrl(ctx, path) });
     return saved;
   }
 
@@ -729,7 +739,7 @@
       if (!d.file_uuid) continue;
       const name = baseName(d.path);
       const saved = ctx.alloc(name);
-      ctx.jobs.push({ name: saved, url: fileContentsUrl(ctx.org, d.file_uuid) });
+      ctx.jobs.push({ name: saved, url: fileContentsUrl(ctx.org, d.file_uuid), fallback: sandboxUrl(ctx, d.path) });
       out += (isImageName(saved) ? '!' : '📎 ') + `[${mdLabel(name)}](${mdPath(saved)})` +
         (caption ? ` — ${escapeHtml(caption)}` : '') + '\n\n';
     }
@@ -882,9 +892,9 @@
   // ---------- Главный сценарий ----------
 
   // Общая часть: собрать markdown, сохранить лог, исходные данные и файлы
-  async function writeExport(badge, { conv, org, settings, title, subtitle, raw, estimate }) {
+  async function writeExport(badge, { conv, org, settings, title, subtitle, raw, estimate, chatId }) {
     const ctx = {
-      org, settings, estimate, alloc: nameAllocator(), jobs: [],
+      org, settings, estimate, chatId, alloc: nameAllocator(), jobs: [],
       files: new Map(), // путь -> текст файлов, которые пишет Claude
       versions: new Map(), // имя рабочего файла -> сколько его версий уже сохранено
       artifacts: new Map(), // url артефакта -> {title, description}
@@ -917,7 +927,15 @@
       try {
         const target = `${folder}/materials/${job.name}`;
         if (job.blob) await downloadBlob(job.blob, target);
-        else await downloadFromSite(job.url, target);
+        else {
+          try {
+            await downloadFromSite(job.url, target);
+          } catch (e) {
+            // В хранилище файла нет — пробуем рабочую папку чата
+            if (!job.fallback) throw e;
+            await downloadFromSite(job.fallback, target);
+          }
+        }
       } catch (e) {
         console.warn('Chat Logger: файл не сохранён', job.name, e);
         failed.push(job.name);
@@ -942,7 +960,7 @@
     const settings = await getSettings();
     const { org, conv } = await findConversation(id);
     await writeExport(badge, {
-      conv, org, settings, title: conv.name || 'dialog', raw: [['conversation.json', conv]], estimate: true,
+      conv, org, settings, title: conv.name || 'dialog', raw: [['conversation.json', conv]], estimate: true, chatId: id,
     });
   }
 
